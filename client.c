@@ -1,129 +1,111 @@
-#include <stdio.h>
-#include <string.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <stdlib.h>
+#include <sys/socket.h>  // For socket functions
+#include <netinet/in.h>  // For sockaddr_in structure
+#include <sys/select.h>  // For select() and FD_ macros
+#include <sys/time.h>    // For timeval
+#include <string.h>      // For bzero
+#include <stdio.h>       // For printf, scanf, perror
+#include <arpa/inet.h>   // For inet_addr
+#include <unistd.h>      // For close
 
-#pragma comment(lib,"ws2_32.lib")
-
+// Define the port and IP address
 #define PORT 5678
-#define BUFSIZE 1024
-
-// Helper function to read a line from stdin
-int read_input(const char* prompt, char* buffer, size_t max_len) {
-    printf("%s", prompt);
-    if (fgets(buffer, max_len, stdin) == NULL) {
-        // EOF (CTRL+Z on Windows console) encountered
-        return -1;
-    }
-    // Remove the trailing newline character, if present
-    buffer[strcspn(buffer, "\n")] = 0;
-    return 0;
-}
-
-// Validation function for String A
-// Character count must be between 5 to 10
-int is_A_legal(const char* s) {
-    size_t len = strlen(s);
-    return (len >= 5 && len <= 10);
-}
-
-// Validation function for String B
-// Character count must be even
-int is_B_legal(const char* s) {
-    size_t len = strlen(s);
-    return (len > 0 && (len % 2 == 0));
-}
+#define IP_ADDRESS "127.0.0.1"
+#define TIMEOUT_SEC 3 // Timeout for user input
 
 int main() {
-    WSADATA wsaData;
-    SOCKET ConnectSocket = INVALID_SOCKET;
-    struct sockaddr_in server_addr;
-    char bufferA[BUFSIZE];
-    char bufferB[BUFSIZE];
-    char bufferID[BUFSIZE];
-    char recvbuf[BUFSIZE];
-    int bytes_received;
+    // File descriptor set for select (we will monitor standard input, fd 0)
+    fd_set rfds;
+    struct sockaddr_in server;
+    struct timeval tv; // Time-out structure
+    
+    int sock, readSize, addressSize;
+    int retval; // Return value for select
+    int num1, num2, ans; // Variables for numbers and answer
+    
+    // 1. Initialize server structure
+    bzero(&server, sizeof(server));
+    server.sin_family = PF_INET;
+    // Set server IP address (localhost)
+    server.sin_addr.s_addr = inet_addr(IP_ADDRESS);
+    // Set server port
+    server.sin_port = htons(PORT);
 
-    // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        printf("WSAStartup failed with error: %d\n", WSAGetLastError());
+    // 2. Create a UDP socket (SOCK_DGRAM)
+    sock = socket(PF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("socket creation failed");
         return 1;
     }
 
-    // Main client loop (runs endlessly until EOF)
-    while (1) {
-        // Reset buffers for the new round
-        memset(bufferA, 0, BUFSIZE);
-        memset(bufferB, 0, BUFSIZE);
-        memset(bufferID, 0, BUFSIZE);
+    addressSize = sizeof(server);
 
-        printf("\n-------------------------------------------------\n");
-        printf("Please enter three inputs (CTRL+Z then ENTER to quit):\n");
+    // 3. Get the first number from the user
+    printf("Enter the first number (num1): ");
+    if (scanf("%d", &num1) != 1) {
+        fprintf(stderr, "Invalid input for num1.\n");
+        close(sock);
+        return 1;
+    }
 
-        // 1. Take input for String A
-        if (read_input("String A (5-10 chars): ", bufferA, BUFSIZE) == -1) break;
-        
-        // 1. Take input for String B
-        if (read_input("String B (Even length): ", bufferB, BUFSIZE) == -1) break;
-        
-        // 1. Take input for Student ID
-        if (read_input("Student ID: ", bufferID, BUFSIZE) == -1) break;
-        
-        // 4. Make sure the string (A) and (B) are legal
-        if (!is_A_legal(bufferA) || !is_B_legal(bufferB)) {
-            printf("\n[ERROR] Validation failed: String A (5-10 chars) or String B (even length) is illegal.\n");
-            printf("error\n");
-            continue; // Go to the next iteration
+    // 4. Send the first number to the server
+    if (sendto(sock, &num1, sizeof(num1), 0, (struct sockaddr *)&server, sizeof(server)) < 0) {
+        perror("sendto num1 failed");
+        close(sock);
+        return 1;
+    }
+
+    printf("Sent num1: %d. Now waiting up to %d seconds for the second number...\n", num1, TIMEOUT_SEC);
+    
+    // 5. Setup file descriptor set and timeout for select()
+    FD_ZERO(&rfds);   // Clear the set
+    FD_SET(0, &rfds); // Add standard input (file descriptor 0) to the set
+
+    // Set the timeout value to 5 seconds
+    tv.tv_sec = TIMEOUT_SEC; 
+    tv.tv_usec = 0; 
+    
+    // 6. Use select() to wait for data on standard input (fd 0)
+    // The first argument (n) for select is the highest-numbered file descriptor plus one.
+    // Here, we monitor fd 0 (stdin), so n=1 is correct.
+    retval = select(1, &rfds, NULL, NULL, &tv);
+
+    if (retval == -1) {
+        // select error
+        perror("select error!");
+        num2 = 0; // Default error value
+    } else if (retval) {
+        // Data is available (user input detected)
+        printf("Input detected. Enter the second number (num2): ");
+        if (scanf("%d", &num2) != 1) {
+            fprintf(stderr, "Invalid input for num2, using default (0).\n");
+            num2 = 0;
         }
-        
-        printf("[INFO] Inputs are legal. Connecting to server...\n");
-
-        // Create a SOCKET for connection
-        ConnectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (ConnectSocket == INVALID_SOCKET) {
-            printf("[ERROR] socket failed with error: %d\n", WSAGetLastError());
-            // Need to cleanup Winsock but also continue the loop gracefully if possible
-            continue;
-        }
-
-        // Setup the TCP server address
-        memset(&server_addr, 0, sizeof(server_addr));
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-        server_addr.sin_port = htons(PORT);
-        
-        // Connect to server
-        if (connect(ConnectSocket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-            printf("[ERROR] Connect failed with error: %d\n", WSAGetLastError());
-            closesocket(ConnectSocket);
-            continue;
-        }
-        
-        printf("[INFO] Connected. Sending A, B, and ID sequentially.\n");
-
-        // 2. Send A, B, and ID to the TCP echo server
-        send(ConnectSocket, bufferA, (int)strlen(bufferA), 0);
-        send(ConnectSocket, bufferB, (int)strlen(bufferB), 0);
-        send(ConnectSocket, bufferID, (int)strlen(bufferID), 0);
-
-        // 3. Receive the echo reply string and print it
-        bytes_received = recv(ConnectSocket, recvbuf, BUFSIZE - 1, 0);
-        if (bytes_received > 0) {
-            recvbuf[bytes_received] = '\0';
-            printf("\n<<< SERVER REPLY >>>\n%s\n", recvbuf);
-        } else if (bytes_received == 0) {
-            printf("[INFO] Connection closed by server.\n");
-        } else {
-            printf("[ERROR] Receive failed with error: %d\n", WSAGetLastError());
-        }
-
-        // Close socket and start over (necessary because the server closes the socket after each response)
-        closesocket(ConnectSocket);
+    } else {
+        // Timeout occurred (retval is 0)
+        num2 = 100; // Use the default value 100 as per your original code
+        printf("Timeout reached. Sending default num2: %d.\n", num2);
     }
     
-    printf("\n[INFO] EOF entered. Closing connection and exiting.\n");
-    // Final cleanup
-    WSACleanup();
+    // 7. Send the second number (either user input or default 100)
+    if (sendto(sock, &num2, sizeof(num2), 0, (struct sockaddr *)&server, sizeof(server)) < 0) {
+        perror("sendto num2 failed");
+        close(sock);
+        return 1;
+    }
+
+    // 8. Receive the final result from the server
+    printf("Waiting for server's answer...\n");
+    readSize = recvfrom(sock, &ans, sizeof(ans), 0, (struct sockaddr *)&server, &addressSize);
+    
+    if (readSize < 0) {
+        perror("recvfrom answer failed");
+        close(sock);
+        return 1;
+    }
+    
+    printf("Read Message (Answer): %d\n", ans);
+
+    // 9. Close the socket
+    close(sock);
     return 0;
 }
